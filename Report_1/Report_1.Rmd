@@ -1,0 +1,761 @@
+---
+title: "Analiza białoszumowości i dekompozycja szeregów czasowych"
+author: "Ksawery Józefowski, 277513"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: true
+    fig_caption: true
+    fig_width: 5
+    fig_height: 4
+    number_sections: true
+  html_document:
+    toc: true
+    df_print: paged
+header-includes:
+- \usepackage[OT4]{polski}
+- \usepackage[utf8]{inputenc}
+- \usepackage{graphicx}
+- \usepackage{float}
+subtitle: Analiza szeregów czasowych
+fontsize: 12pt
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+knitr::opts_chunk$set(fig.pos = "H", out.extra = "", fig.align = "center")
+library(knitr)
+library(kableExtra)
+library(ggplot2)
+library(gridExtra)
+library(forecast)
+library(fitdistrplus)
+library(xtable)
+library(TSAFBook)
+library(tseries)
+library(seasonal)
+```
+
+\newpage
+# Analiza białego szumu w szeregach czasowych
+## Wstęp
+
+Badamy metody weryfikacji hipotezy, że obserwowany szereg czasowy jest białym szumem $\{X_t\} \sim WN(0,\sigma^{2})$. Biały szum definiujemy jako ciąg niezależnych zmiennych losowych o identycznym rozkładzie z $E[X_t] = 0$, $Var(X_t) = \sigma^{2}$ i $Cov[X_t,X_{t+h}]=0$, gdzie funkcja kowariancji nie zależy od $t$:
+$$
+\gamma_X(t+h, t) = 
+\begin{cases}
+\sigma^{2}, & \text{gdy } h = 0,\\[6pt]
+0, & \text{gdy } h \neq 0,
+\end{cases}
+$$
+Analiza obejmuje zarówno test graficzny oparty na własnościach funkcji autokorelacji białego szumu i asymptotycznym rozkładzie autokorelacji próbkowej, jak i formalne testy statystyczne oparte na statystykach Boxa-Pierce’a oraz Ljunga-Boxa. W pierwszej części raportu przedstawiamy implementację obu podejść oraz ich ilustrację na podstawie realizacji szeregów czasowych. W drugiej części przeprowadzamy symulacje pozwalające ocenić skuteczność i zachowanie tych metod w różnych warunkach, uwzględniając liczbę powtórzeń, różne rozkłady, odmienne długości próby, wybór maksymalnego opóźnienia oraz przypadki procesów odbiegających od białego szumu.
+
+## Hipotezy
+
+- **Hipoteza zerowa $H_0$**: Szereg czasowy jest białym szumem
+  $$
+  H_0: \text{ Wszystkie autokorelacje } \rho_x(h) = 0 \text{ dla } h>0
+  $$
+
+- **Hipoteza alternatywna $H_1$**: Szereg nie jest białym szumem
+  $$
+  H_1: \text{Istnieją istotne autokorelacje dla } h>0
+  $$
+
+Do naszej hipotezy przyjmujemy poziom istotności $\alpha = 0.05$.
+
+## Test Graficzny
+Do weryfikacji hipotezy $H_0$ można wykorzystać funkcję autokorelacji ACF. Autokorelacja dla opóźnienia $h$ definiowana jest jako:
+$$
+\rho_x(h) = \frac{\text{Cov}(X_t, X_{t+h})}{\text{Var}(X_t)}
+$$
+Dla białego szumu oczekujemy $\rho_x(h) \approx 0$.
+Graficzny test polega na narysowaniu histogramu/wykresu słupkowego ACF i porównaniu wartości z granicami istotności.
+```{r, echo=FALSE}
+test_graficzny <- function(series, alpha = 0.05) {
+  n <- length(series)
+  h_max <- min(40, floor(n/2))
+  acf_result <- acf(series, lag.max = h_max, plot = FALSE)
+  
+  granice_ist <- qnorm(1 - alpha/2) / sqrt(n)
+  acf_values <- acf_result$acf[-1]
+  lags <- 1:h_max
+  
+  # Liczenie ile ACF wychodzi poza granice
+  out_acf <- sum(abs(acf_values) > granice_ist)
+  
+  return(list(
+    acf_values = acf_values,
+    lags = lags,
+    granice_ist = granice_ist,
+    out_acf = out_acf,
+    n = n,
+    h_max = h_max
+  ))
+}
+```
+### Przykład 1: Szereg białego szumu
+```{r, echo=FALSE, fig.cap="\\label{fig:t_wn}Test graficzny dla białego szumu", fig.align='center'}
+set.seed(37)
+x1 <- rnorm(100)
+par(mfrow = c(1,2), mar=c(4,4,3,1))
+res <- test_graficzny(x1, alpha = 0.05)
+
+plot(x1, type = "l", main = "Szereg czasowy", ylab = "Wartość", xlab = "Czas", col = "darkblue")
+grid()
+
+plot(res$lags, res$acf_values, type = "h", lwd = 2, ylim = c(-1,1),
+     xlab = "Lag", ylab = "ACF", main = paste0("ACF dla białego szumu"))
+abline(h = c(-res$granice_ist, res$granice_ist), col = "red", lty = 2, lwd = 2)
+abline(h = 0, col = "black", lty = 1)
+
+points(res$lags[abs(res$acf_values) > res$granice_ist], 
+       res$acf_values[abs(res$acf_values) > res$granice_ist], 
+       col = "red", pch = 19)
+par(mfrow = c(1,1))
+```
+Na Rysunek \ref{fig:t_wn} przedstawiliśmy jak wygląda badany szereg białego szumu oraz jak zachowuj się funkcja autokorelecji. Wykres szeregu pokazuje losowe wahania bez wyraźnej struktury, więc jest to faktycznie biały szum. ACF mieści się w granicach istotności więc nasz test nie odrzuca $H_0$ potwierdzając biało szumowość tego szeregu.
+
+### Przykład 2: Szereg AR(1)
+```{r, echo=FALSE, fig.cap="\\label{fig:t_ar}Test graficzny dla AR(1)", fig.align='center'}
+set.seed(37)
+phi <- 0.6
+x2 <- arima.sim(model = list(ar = phi), n = 100)
+par(mfrow = c(1,2), mar=c(4,4,3,1))
+res <- test_graficzny(x2, alpha = 0.05)
+
+plot(x2, type = "l", main = "Szereg czasowy", ylab = "Wartość", xlab = "Czas", col = "darkblue")
+grid()
+
+plot(res$lags, res$acf_values, type = "h", lwd = 2, ylim = c(-1,1),
+     xlab = "Lag", ylab = "ACF", main = paste0("ACF dla AR(1)"))
+abline(h = c(-res$granice_ist, res$granice_ist), col = "red", lty = 2, lwd = 2)
+abline(h = 0, col = "black", lty = 1)
+
+points(res$lags[abs(res$acf_values) > res$granice_ist], 
+       res$acf_values[abs(res$acf_values) > res$granice_ist], 
+       col = "red", pch = 19)
+par(mfrow = c(1,1))
+```
+Na Rysunek \ref{fig:t_ar} wizualizujemy jak wygląda szereg `AR(1)` oraz jego funkcję ACF. Na wykresie szeregu można zauważyć zależność pomiędzy wartościami. ACF wychodzi poza granice istotności dla wielu opóźnień. Stąd nasz test dla tego szeregu odrzuca $H_0$, co wskazuje na obecność korelacji.
+
+### Podsumowanie dla przykładów
+Podsumowując, zaimplementowany test graficzny poprawnie weryfikuje hipotezę o białym szumie. W przypadku szeregu będącego białym szumem nie obserwuje się istotnych autokorelacji, a hipoteza zerowa nie jest odrzucana. Natomiast dla szeregu z pamięcią czasową `AR(1)` test wykazuje autokorelacje i skutecznie odrzuca hipotezę zerową.
+
+\newpage
+## Testy Formalne Boxa-Pierce'a i Ljungi-Boxa
+Formalne testy statystyczne pozwalają zweryfikować hipotezę zerową $H_0$, że obserwowany szereg czasowy jest białym szumem. W tym celu stosuje się m.in. test Boxa-Pierce’a oraz test Ljunga-Boxa.
+
+Ich zasada działania jest bardzo prosta:
+
+1. Najpierw obliczamy autokorelacje szeregu dla kolejnych opóźnień $h = 1,2,\dots,h_{\max}$.  
+2. Następnie sumujemy kwadraty tych autokorelacji, tworząc statystykę testową, która rośnie wraz ze wzrostem zależności w szeregu.  
+3. Porównujemy uzyskaną wartość ze standardowym rozkładem $\chi^2$. Jeśli statystyka jest zbyt duża, oznacza to, że szereg nie zachowuje się jak biały szum, a hipoteza zerowa jest odrzucana.
+
+```{r, echo=FALSE}
+test_formalny <- function(series, h_max = 20, alpha = 0.05) {
+  # Test Boxa-Pierce'a
+  bp <- Box.test(series, lag = h_max, type = "Box-Pierce")
+  # Test Ljunga-Boxa
+  lb <- Box.test(series, lag = h_max, type = "Ljung-Box")
+  
+  results <- data.frame(
+    Test = c("Box-Pierce", "Ljung-Box"),
+    Statistic = c(round(bp$statistic,3), round(lb$statistic,3)),
+    p_value = c(round(bp$p.value,5), round(lb$p.value,5)),
+    Decision = c(
+      ifelse(bp$p.value < alpha, "Odrzucono H0", "Nie odrzucono H0"),
+      ifelse(lb$p.value < alpha, "Odrzucono H0", "Nie odrzucono H0")
+    ),
+    stringsAsFactors = FALSE
+  )
+  
+  return(results)
+}
+```
+
+### Przykład 1: Szereg białego szumu
+```{r, echo=FALSE}
+set.seed(37)
+wyniki <- test_formalny(x1, h_max = 50, alpha = 0.05)
+kable(wyniki, caption = "\\label{tab:ft_wh}Formalne testy białego szumu")
+```
+Wyniki dla białego szumu przedstawiamy w tabeli \ref{tab:ft_wh}. Zarówno test Boxa-Pierce’a, jak i test Ljunga-Boxa wykazały wysokie wartości p-value. Oznacza to, że nie odrzucamy hipotezy zerowej $H_0$, a szereg można uznać za biały szum.
+
+### Przykład 2: Szereg AR(1)
+```{r, echo=FALSE}
+set.seed(37)
+wyniki2 <- test_formalny(x2, h_max = 50, alpha = 0.05)
+kable(wyniki2, caption = "\\label{tab:ft_ar}Formalne testy dla szeregu AR(1)")
+```
+Statystyki dla szeregu `AR(1)` przedstawiamy w tabeli \ref{tab:ft_ar}.W obu testach p-value wynosi 0, co oznacza, że statystyki testowe są znacznie większe od wartości krytycznych. Wnioskujemy więc, że odrzucamy hipotezę zerową $H_0$.
+
+\newpage
+### Podsumowanie dla przykładów
+Podobnie jak test graficzny, testy formalne skutecznie rozróżniają białe szumy od szeregów z zależnością czasową. Dla szeregu będącego białym szumem hipoteza zerowa nie została odrzucona, co potwierdza brak istotnych autokorelacji. Natomiast dla szeregu `AR(1)`, który nie jest białym szumem, testy formalne odrzuciły hipotezę zerową.
+
+## Symulacja
+Poniższa symulacja porównuje skuteczność testu graficznego oraz testów formalnych w wykrywaniu biało-szumowości w różnych typach szeregów czasowych.
+
+### Plan symulacji
+
+- Liczba powtórzeń: $K = 100$ realizacji dla każdej konfiguracji
+- Długość szeregów: $n = 20, 50, 100$
+- Maksymalne opóźnienie: $h_{\max} = 5, 50$
+- Rodzaje rozkładów:
+  - Standardowy normalny $\mathcal{N}(0,1)$
+  - Jednostajny $U(-\sqrt{3}, \sqrt{3})$
+  - t Studenta z 5 stopniami swobody
+- Szeregi inne niż biały szum:
+  - Błądzenie losowe
+  - Szereg z trendem i sezonowością: $X_t = 0.05 t + \sin(2 \pi t / 12)$
+  - Proces `MA(1)` z $\theta = 0.6$
+
+\newpage
+```{r, echo=FALSE}
+# Parametry symulacji
+set.seed(37)
+K <- 100
+n_values <- c(20, 50, 100)
+h_max_values <- c(5, 50)
+
+# Lista rozkładów białego szumu
+rozklady <- list(
+  Normalny = function(n) rnorm(n),
+  Jednostajny = function(n) runif(n, -sqrt(3), sqrt(3)),
+  t5_Stud = function(n) rt(n, df = 5)
+)
+
+# Lista szeregów nie białoszumowych
+niebiale <- list(
+  MA1 = function(n, theta = 0.6) as.numeric(arima.sim(model = list(ma = theta), n = n)),
+  RW  = function(n) cumsum(rnorm(n)),
+  TrendSezon = function(n) {
+    t <- 1:n
+    trend <- 0.05 * t
+    sezon <- sin(2*pi*t/12)
+    rnorm(n) + trend + sezon
+  }
+)
+
+out_results <- data.frame()
+for (d in names(rozklady)) {
+  for (ni in n_values) {
+    for (h_max in h_max_values) {
+      reject_graphic <- 0
+      reject_box <- 0
+      reject_ljung <- 0
+      
+      for (k in 1:K) {
+        x <- rozklady[[d]](ni)
+        res_g <- test_graficzny(x, alpha = 0.05)
+        if (res_g$out_acf > 0) reject_graphic <- reject_graphic + 1
+        
+        res_f <- test_formalny(x, h_max = min(h_max, length(x)-1), alpha = 0.05)
+        if (!is.null(res_f$Decision) && length(res_f$Decision) >= 2) {
+          if (res_f$Decision[1] == "Odrzucono H0") reject_box <- reject_box + 1
+          if (res_f$Decision[2] == "Odrzucono H0") reject_ljung <- reject_ljung + 1
+        }
+      }
+      
+      out_results <- rbind(out_results, data.frame(
+        Model = d,
+        n = ni,
+        h_max = h_max,
+        Grafik = reject_graphic / K,
+        BoxPierce = reject_box / K,
+        LjungBox = reject_ljung / K
+      ))
+    }
+  }
+}
+
+for (m in names(niebiale)) {
+  for (ni in n_values) {
+    for (h_max in h_max_values) {
+      reject_graphic <- 0
+      reject_box <- 0
+      reject_ljung <- 0
+      
+      for (k in 1:K) {
+        x <- niebiale[[m]](ni)
+        res_g <- test_graficzny(x, alpha = 0.05)
+        if (res_g$out_acf > 0) reject_graphic <- reject_graphic + 1
+        
+        res_f <- test_formalny(x, h_max = min(h_max, length(x)-1), alpha = 0.05)
+        if (!is.null(res_f$Decision) && length(res_f$Decision) >= 2) {
+          if (res_f$Decision[1] == "Odrzucono H0") reject_box <- reject_box + 1
+          if (res_f$Decision[2] == "Odrzucono H0") reject_ljung <- reject_ljung + 1
+        }
+      }
+      
+      out_results <- rbind(out_results, data.frame(
+        Model = m,
+        n = ni,
+        h_max = h_max,
+        Grafik = reject_graphic / K,
+        BoxPierce = reject_box / K,
+        LjungBox = reject_ljung / K
+      ))
+    }
+  }
+}
+
+kable(out_results, digits = 3,
+      caption = "\\label{tab:tbl_sim}Odsetek odrzuceń H0 dla różnych testów i różnych typów szeregów")
+```
+
+\newpage
+Analiza wyników z tabeli \ref{tab:tbl_sim} pozwala wyciągnąć następujące wnioski. Dla szeregów będących białym szumem, obserwujemy, że test graficzny radzi sobie coraz gorzej wraz ze wzrostem długości szeregu. Im dłuższy szereg, tym wyższy jest odsetek odrzuceń hipotezy $H_0$, co wskazuje na tendencję tego testu do błędnego klasyfikowania białego szumu. Parametr $h_{max}$ nie wpływa przy tym w sposób znaczący na wyniki. W przeciwieństwie do tego, testy formalne radzą sobie z tym zadaniem znacznie lepiej. Test Boxa-Pierce'a wykazuje niemal idealne wyniki, mieszczące się w granicach błędu, przy czym im większa wartość $h_{max}$, tym lepiej rozpoznaje on biały szum, a długość szeregu nie ma istotnego wpływu na jego skuteczność. Test Ljung-Boxa radzi sobie nieco gorzej niż test Boxa-Pierce'a, co wynika z jego nieco wyższej mocy, która w tym przypadku prowadzi do nieco częstszego błędnego odrzucania $H_0$. Dla testu Ljung-Boxa obserwuje się, że im większa wartość $h_{max}$, tym gorzej radzi on sobie z poprawną identyfikacją białego szumu, podczas gdy długość szeregu ponownie nie wpływa znacząco na rezultaty.
+
+W przypadku szeregów, które nie są białym szumem, test graficzny wykazuje bardzo dobrą skuteczność. Im dłuższy jest badany szereg, tym lepiej radzi sobie z poprawnym odrzuceniem $H_0$, przy czym $h_{max}$ nie odgrywa tu znaczącej roli. Dla testu Boxa-Pierce'a również im dłuższy szereg, tym lepiej wykrywa on niebiałoszumowość. Jednakże w jego przypadku obserwuje się wyraźny negatywny wpływ parametru $h_{max}$. Im jest on większy, tym gorzej test ten radzi sobie z wykrywaniem zależności. Doskonale widać to na przykładzie szeregu z trendem i sezonowością, gdzie dla $n=20$ i $h_{max}=50$ odsetek odrzuceń jest równy 0, co oznacza, że test uznaje ten proces w pełni za biały szum. Test Ljung-Boxa również nie radzi sobie w tych warunkach idealnie, lecz znacznie lepiej niż Box-Pierce. Ogólnie im dłuższy szereg, tym lepiej odrzuca $H_0$. W przeciwieństwie do testu Boxa-Pierce'a, im większy parametr $h_{max}$ tym lepsze wyniki testu.
+
+\newpage
+# Dekompozycja Szeregów
+
+## Wstęp
+Celem zadania jest analiza wybranego szeregu czasowego. W naszym przypadku będzie to **bezrobocie{TSAFBook}**, obejmująca identyfikację jego podstawowych własności oraz zastosowanie i porównanie wybranych metod dekompozycji. Dekompozycja szeregów czasowych, umożliwia rozbicie obserwowanego szeregu $X_t = f(s_t, m_t, Z_t)$ na trzy główne komponenty: trend $m_t$, sezonowość $s_t$ oraz składnik losowy $Z_t$.  
+W zależności od charakteru danych rozważamy modele addytywne:
+
+$$
+X_t = s_t + m_t + Z_t
+$$
+oraz modele multiplikatywne:
+
+$$
+X_t = s_t \cdot m_t \cdot Z_t
+$$
+
+W pierwszej części raportu przeprowadzimy wstępną analizę graficzną szeregu bezrobocia. Pozwoli to ocenić obecność trendu, struktury sezonowej, potencjalnych zmian wariancji oraz obserwacji odstających.
+
+Następnie zastosujemy trzy metody dekompozycji:
+
+* dekompozycję opartą na ruchomej średniej `decompose()`,
+* dekompozycję regresyjną opartą na modelu `tslm()`.
+* dekompozycję STL bazującą na lokalnym wygładzaniu `stl()`. 
+
+W analizie uwzględnimy również wpływ parametrów poszczególnych metod: wybór modelu addytywnego lub multiplikatywnego w `decompose()`, wykorzystanie różnych modeli trendu w `tslm()`, oraz wpływ parametrów wygładzających w metodzie `STL`. Sprawdzimy także, czy zastosowanie transformacji Boxa–Coxa może poprawić jednorodność wariancji i jakość otrzymanej dekompozycji.
+
+Ostatnim etapem raportu będzie porównanie wyników dekompozycji z rezultatami uzyskanymi poprzez odpowiednie różnicowanie szeregu. Analiza szeregu reszt pozwoli ocenić, czy pozostałości po usunięciu trendu i sezonowości można uznać za realizację szeregu stacjonarnego.
+
+\newpage
+## Podstawowe własności szeregu
+W tej części raportu analizujemy podstawowe własności szeregu czasowego `bezrobocie{TSAFBook}`. W szczególności badamy obecność trendu,
+sezonowości, jednorodność wariancji oraz ewentualne obserwacje odstające.
+
+```{r, echo=FALSE}
+data("bezrobocie")
+
+info_szeregu <- data.frame(
+  Parametr = c("Początek szeregu", "Koniec szeregu", "Częstotliwość", "Długość szeregu"),
+  Wartość = c(
+    paste(start(bezrobocie), collapse = " "),
+    paste(end(bezrobocie), collapse = " "),
+    frequency(bezrobocie),
+    length(bezrobocie)
+  )
+)
+
+kable(info_szeregu, digits = 3,
+      caption = "\\label{tab:tbl_stats}Podstawowe informacje o szeregu bezrobocie")
+
+kable(as.data.frame(matrix(summary(bezrobocie), nrow = 1)),
+             col.names = c("Min", "1st Q", "Mediana", "Średnia", "3rd Q", "Max"),
+             digits = 3,
+             caption = "\\label{tab:tbl_s_summ}Podstawowe statystyki opisowe szeregu bezrobocie")
+```
+
+```{r, echo=FALSE, fig.width=7, fig.height=8.5, fig.cap="\\label{fig:fig_bs1}Wykresy Szeregu i wygładzenia trendu", fig.align='center'}
+par(mar = c(5, 4, 4, 2) + 0.1)
+par(mfrow = c(2, 1))
+plot(bezrobocie, main = "Szereg", 
+     ylab = "Stopa bezrobocia", xlab = "Czas", col = "blue", lwd = 1.5)
+grid()
+
+plot(bezrobocie, main = "Szereg z wygładzeniem trendu", 
+     ylab = "Stopa bezrobocia", xlab = "Czas", col = "gray", lwd = 1)
+lines(ma(bezrobocie, order = 12), col = "red", lwd = 2)
+legend("topright", legend = c("Oryginał", "Średnia ruchoma"), 
+       col = c("gray", "red"), lwd = c(1, 2), cex = 0.7)
+grid()
+```
+
+```{r, echo=FALSE, fig.width=7, fig.height=8.5, fig.cap="\\label{fig:fig_bs5}Wykresy rozkładu i gęstości szeregu bezrobocia", fig.align='center'}
+par(mfrow = c(2, 1))
+hist(bezrobocie, main = "Rozkład bezrobocia", 
+     xlab = "Stopa bezrobocia", ylab = "Częstość", col = "lightblue", breaks = 20)
+plot(density(bezrobocie), main = "Gęstość rozkładu bezrobocia",
+     xlab = "Stopa bezrobocia", ylab = "Gęstość", col = "blue", lwd = 2)
+polygon(density(bezrobocie), col = rgb(0, 0, 1, 0.3))
+par(mfrow = c(1, 1))
+par(mar = c(5, 4, 4, 2) + 0.1)
+```
+
+```{r, echo=FALSE, fig.width=7, fig.height=8.5, fig.cap="\\label{fig:fig_bs2}Wykresy sezonowości szeregu", fig.align='center'}
+par(mfrow = c(2, 1))
+seasonplot(bezrobocie, main = "Wykres sezonowy", 
+           ylab = "Stopa bezrobocia", xlab = "Okres", 
+           year.labels = TRUE, col = 1:10)
+
+boxplot(bezrobocie ~ cycle(bezrobocie), 
+        main = "Rozkład sezonowy",
+        xlab = "Okres sezonowy", 
+        ylab = "Stopa bezrobocia",
+        col = "lightblue")
+```
+
+```{r, echo=FALSE, fig.width=7, fig.height=8.5, fig.cap="\\label{fig:fig_bs3}Wykresy wariancji i oserwacji odstających", fig.align='center'}
+par(mfrow = c(2, 1))
+periods <- cut(time(bezrobocie), breaks = 4)
+boxplot(as.numeric(bezrobocie) ~ periods,
+        main = "Wariancja w czasie",
+        xlab = "Okresy czasowe",
+        ylab = "Stopa bezrobocia",
+        col = "lightgreen")
+
+plot(bezrobocie, main = "Obserwacje odstające szeregu", 
+     ylab = "Stopa bezrobocia", xlab = "Czas", col = "blue", lwd = 1)
+outliers <- which(bezrobocie > mean(bezrobocie) + 2*sd(bezrobocie) | 
+                  bezrobocie < mean(bezrobocie) - 2*sd(bezrobocie))
+points(time(bezrobocie)[outliers], bezrobocie[outliers], 
+       col = "red", pch = 19, cex = 1.2)
+legend("topright", legend = c("Dane", "Obserwacje odstające"), 
+       col = c("blue", "red"), pch = c(NA, 19), lwd = c(1, 0), cex = 0.7)
+grid()
+```
+
+```{r, echo=FALSE, fig.width=7, fig.height=8.5, fig.cap="\\label{fig:fig_bs4}Wykresy ACF i PACF", fig.align='center'}
+par(mfrow = c(2, 1))
+acf_bezrobocie <- acf(bezrobocie, lag.max = 48, plot = FALSE)
+
+plot(acf_bezrobocie$lag, acf_bezrobocie$acf, type = "h", lwd = 2, ylim = c(-1,1),
+     xlab = "Lag", ylab = "ACF", main = "ACF")
+abline(h = c(-1.96/sqrt(length(bezrobocie)), 1.96/sqrt(length(bezrobocie))), 
+       col = "red", lty = 2, lwd = 2)
+abline(h = 0, col = "black", lty = 1)
+
+points(acf_bezrobocie$lag[abs(acf_bezrobocie$acf) > 1.96/sqrt(length(bezrobocie))], 
+       acf_bezrobocie$acf[abs(acf_bezrobocie$acf) > 1.96/sqrt(length(bezrobocie))], 
+       col = "red", pch = 19)
+
+pacf_bezrobocie <- pacf(bezrobocie, lag.max = 48, plot = FALSE)
+
+plot(pacf_bezrobocie$lag, pacf_bezrobocie$acf, type = "h", lwd = 2, ylim = c(-1,1),
+     xlab = "Lag", ylab = "PACF", main = "PACF")
+abline(h = c(-1.96/sqrt(length(bezrobocie)), 1.96/sqrt(length(bezrobocie))), 
+       col = "red", lty = 2, lwd = 2)
+abline(h = 0, col = "black", lty = 1)
+
+points(pacf_bezrobocie$lag[abs(pacf_bezrobocie$acf) > 1.96/sqrt(length(bezrobocie))], 
+       pacf_bezrobocie$acf[abs(pacf_bezrobocie$acf) > 1.96/sqrt(length(bezrobocie))], 
+       col = "red", pch = 19)
+par(mfrow = c(1, 1))
+```
+
+### Analiza wyników podstawowych własności szeregu
+W oparciu o przedstawione wykresy, statystyki opisowe oraz analizę sezonowości i autokorelacji szeregu `bezrobocie{TSAFBook}`, możemy sformułować następujące wnioski:
+
+1. Trend i ogólne zachowanie szeregu: Na rysunku \ref{fig:fig_bs1} z wykresu szeregu oraz wykresu z nałożoną średnią ruchomą wynika, że stopa bezrobocia wykazuje wyraźne trendy długookresowe. W pewnym okresie obserwujemy spadki, w innych wzrosty, przy czym wygładzenie sugeruje wolnozmienne trendy. Nie jest to szereg stacjonarny.
+
+2. Sezonowość: Wykres sezonowy oraz rozkład sezonowy z rysunku \ref{fig:fig_bs2} wskazują na powtarzalną sezonowość. W poszczególnych okresach w roku wartości bezrobocia układają się podobnie, co oznacza, że:
+   $$X_t = s_t + m_t + Z_t$$
+   , gdzie $s_t$ jest istotnym składnikiem.
+
+3. Wariancja w czasie i Obserwacje odstające: Analizując rysunek \ref{fig:fig_bs3} zauważamy, że wariancja w różnych segmentach czasowych nie wskazuje na duże zmiany rozproszenia wartości. Obserwacje odstające nie pojawiają się, co oznacza, że szereg nie zawiera poważnych anomalii. 
+
+4. Rozkład: Histogram i estymowana gęstość z rysunku \ref{fig:fig_bs5} wskazują, że rozkład stopy bezrobocia różni się od rozkładu normalnego, co jest typowe dla danych ekonomicznych. Nie można więc przyjąć $X_t \sim \mathcal{N}(\mu, \sigma^2)$.
+
+6. Autokorelacja i częściowa autokorelacja: Na rysunk \ref{fig:fig_bs4} wykresy ACF i PACF pokazują liczne istotne autokorelacje dla małych i sezonowych opóźnień, jak i cykliczne wzorce zgodne z częstotliwością sezonową. Oznacza to, że szereg wykazuje zależność czasową, co potwierdza niestacjonarność i obecność sezonowości $\rho(k) \not\approx 0 \quad \text{dla wielu } k$.
+
+## Dekompozycje
+W tej części analizujemy trzy podejścia do dekompozycji szeregu `bezrobocie`:
+
+* klasyczną dekompozycję opartą na średnich ruchomych (`decompose()`),
+* dekompozycję modelową (`tslm()`),
+* dekompozycję opartą na wygładzaniu lokalnym (`stl()`).
+
+Celem jest ocena jakości dopasowania oraz wpływu parametrów poszczególnych metod na uzyskane wyniki.
+
+### Dekompozycja na podstawie ruchomej średniej
+Zaczynamy najpierw od dekompozycji na podstawie ruchomej średniej. Rozpatrzymy model addytywny i model multiplikatywny, które dogłębniej opisałem we wstępie.
+```{r, echo=FALSE, fig.width=7, fig.height=6, fig.cap="\\label{fig:fig_dek1}Dopasowanie dekompozycji na podstawie ruchomej średniej, addytywnie i multiplikatywnie ", fig.align='center'}
+par(mfrow = c(1, 1))
+# Addytywny
+dekomp.add <- decompose(bezrobocie, type = "additive")
+dekomp.add.trend <- dekomp.add$trend
+dekomp.add.sezonowosc <- dekomp.add$seasonal
+dekomp.add.reszty <- dekomp.add$random
+dekomp.add.fit <- dekomp.add.trend + dekomp.add.sezonowosc
+
+# Multiplikatywny
+dekomp.mult <- decompose(bezrobocie, type = "multiplicative")
+dekomp.mult.fit <- dekomp.mult$trend * dekomp.mult$seasonal
+
+plot(bezrobocie, main = "", ylab = "Stopa bezrobocia", xlab = "Czas")
+lines(dekomp.add.fit, col = "red", lwd = 2)
+lines(dekomp.mult.fit, col = "blue", lwd = 2)
+legend("topright", legend = c("Oryginał", "Addytywne", "Multiplikatywne"), col = c("black", "red", "blue"), lwd = 2)
+```
+W przypadku szeregu `bezrobocie` amplituda sezonowości jest względnie stała w czasie, a poziom szeregu ulega długookresowym zmianom.
+Z tego powodu zauważamy na wykresie \ref{fig:fig_dek1}, że model addytywny daje bardziej stabilne dopasowanie i nie przeszacowuje wahań sezonowych na przełomie okresów o niskiej wartości szeregu. Model multiplikatywny dopasowuje trend poprawnie, ale zawyża amplitudę sezonowości w okresach wysokiego bezrobocia i zaniża ją w okresach niskiego, co wskazuje na gorsze dopasowanie.
+
+\newpage
+### Dekompozycja na podstawie modelu
+Następną dekompozycją jaką rozpatrzymy jest dekompozycja na podstawie modelu. W tej sekcji zakładamy, że trend $m_t$ można przybliżyć poprzez wielomian trendu, pewnego stopnia. Natomiast sezonowość $s_t$ opiszemy zero-jedynkowo. Modele, które będziemy rozważać to:
+
+* liniowy $m_t = a + bt$
+* kwadratowy $m_t = a + bt + ct^2$
+* sześcienny $m_t = a + bt + ct^2 + dt^3$
+* wielomian czwartego stopnia $m_t = a + bt + ct^2 + dt^3 + et^4$
+
+```{r, echo=FALSE, fig.width=7, fig.height=6, fig.cap="\\label{fig:fig_dek3}Dopasowanie dekompozycji na podstawie różnych modeli", fig.align='center'}
+tslm_lin <- tslm(bezrobocie ~ trend + season)
+tslm_kwad <- tslm(bezrobocie ~ trend + I(trend^2) + season)
+tslm_szesc <- tslm(bezrobocie ~ trend + I(trend^2) + I(trend^3) + season)
+tslm_quad <- tslm(bezrobocie ~ trend + I(trend^2) + I(trend^3) + I(trend^4) + season)
+
+models <- list(tslm_lin, tslm_kwad, tslm_szesc, tslm_quad)
+
+plot(bezrobocie, 
+     main = "",
+     ylab = "Stopa bezrobocia", 
+     xlab = "Czas",
+     lwd = 2,
+     col = "black")
+
+lines(fitted(tslm_lin), col = "red", lwd = 1.5)
+lines(fitted(tslm_kwad), col = "blue", lwd = 1.5)
+lines(fitted(tslm_szesc), col = "green", lwd = 1.5)
+lines(fitted(tslm_quad), col = "orange", lwd = 1.5)
+
+legend("topright", 
+       legend = c("Szereg", 
+                  "Liniowy", 
+                  "Kwadratowy",
+                  "Sześcienny", 
+                  "Stopnia 4"),
+       col = c("black", "red", "blue", "green", "orange"), 
+       lwd = c(2, 1.5, 1.5, 1.5, 1.5),
+       bg = "white",
+       cex = 0.8)
+```
+\newpage
+Z rysunku \ref{fig:fig_dek3} widzimy wyraźnie, że model liniowy jest najprostszą konstrukcją i nie jest w stanie uchwycić nieliniowych zmian poziomu bezrobocia. W efekcie trend jest znacznie niedopasowany, choć sama sezonowość jest estymowana poprawnie, ponieważ zmienne sezonowe w modelu działają niezależnie od postaci trendu. Podobna sytuacja występuje w modelu kwadratowym. Z jednej strony dodanie składnika $t^2$ pozwala na opisanie prostych krzywizn trendu, z drugiej jednak trend bezrobocia zmienia się w sposób bardziej złożony niż parabola. Model kwadratowy nie potrafi więc dobrze uchwycić zmienności długookresowej, mimo że składnik sezonowy pozostaje poprawnie estymowany.
+
+Znaczącą poprawę dopasowania obserwujemy w modelu sześciennym, który dzięki dodatkowej elastyczności znacznie lepiej odwzorowuje zmienność trendu, a tym samym wyraźnie redukuje autokorelację reszt. Krzywizna trzeciego stopnia okazuje się wystarczająca, by uchwycić główne nieliniowości w przebiegu bezrobocia. Model czwartego stopnia dopasowuje trend nieco lepiej niż model sześcienny, jednak równocześnie zaczynają pojawiać się oznaki overfittingu.
+
+Pod względem jakości odwzorowania trendu i reszt, modele można uporządkować następująco:
+$$Liniowy < Kwadratowy < Sześcienny < Stopnia 4$$
+
+### Dekompozycja STL oparta na metodzie loess
+W tej sekcji rozważymy dekompozycję STL oparta na metodzie loess, która umożliwia elastyczne i niezależne modelowanie komponentów trendu, sezonowości i reszt. STL pozwala regulować stopień wygładzenia zarówno trendu, jak i sezonowości, co daje większą kontrolę nad jakością dopasowania. Kluczową rolę odegrają tutaj parametry wygładzenia. Będziemy analizować parametry:
+
+* $s.window = periodic$ — sezonowość stała, bez wygładzania,
+* $s.window = 13$
+* $t.window = 7, 21$
+
+```{r, echo=FALSE, fig.width=7, fig.height=6, fig.cap="\\label{fig:fig_dek4}Porównanie dopasowania dekompozycji STL z różnymi parametrami", fig.align='center'}
+dekomp.stl.1 <- stl(bezrobocie, s.window = "periodic")
+dekomp.stl.2 <- stl(bezrobocie, s.window = 13)
+dekomp.stl.3 <- stl(bezrobocie, s.window = 13, t.window = 7)
+dekomp.stl.4 <- stl(bezrobocie, s.window = 13, t.window = 21)
+
+dopasowanie.stl.1 <- trendcycle(dekomp.stl.1) + seasonal(dekomp.stl.1)
+dopasowanie.stl.2 <- trendcycle(dekomp.stl.2) + seasonal(dekomp.stl.2)
+dopasowanie.stl.3 <- trendcycle(dekomp.stl.3) + seasonal(dekomp.stl.3)
+dopasowanie.stl.4 <- trendcycle(dekomp.stl.4) + seasonal(dekomp.stl.4)
+
+plot(bezrobocie, 
+     main = "",
+     ylab = "Stopa bezrobocia", 
+     xlab = "Czas",
+     lwd = 2,
+     col = "black")
+
+lines(dopasowanie.stl.1, col = "red", lwd = 1.5)
+lines(dopasowanie.stl.2, col = "blue", lwd = 1.5)
+lines(dopasowanie.stl.3, col = "green", lwd = 1.5)
+lines(dopasowanie.stl.4, col = "orange", lwd = 1.5)
+legend("topright", 
+       legend = c("Szereg", 
+                  "s.window = periodic", 
+                  "s.window = 13, t.window = default",
+                  "s.window = 13, t.window = 7", 
+                  "s.window = 13, t.window = 21"),
+       col = c("black", "red", "blue", "green", "orange"), 
+       lwd = c(2, 1.5, 1.5, 1.5, 1.5),
+       bg = "white",
+       cex = 0.8)
+grid()
+```
+Z rysunku \ref{fig:fig_dek4} odczytujemy, że Ustawienie $s.window = periodic$ wymusza identyczny przebieg sezonowości w każdym roku. Model dopasowuje się stabilnie, ale ignoruje subtelne zmiany sezonowe w czasie. Wariant z $s.window = 13$ pozwala na dostosowanie sezonowości lokalnie, dzięki czemu uchwycone zostają drobne zmiany struktury sezonowej. Parametr $t.window$ kontroluje wygładzanie trendu, $t.window = 7$ daje trend bardziej "poszarpany", reagujący na krótkookresowe zmiany, zato $t.window = 21$ daje trend gładki, wygładzony, miejscami zbyt mocno. `STL` daje największą elastyczność spośród wszystkich metod, ponieważ umożliwia niezależne kontrolowanie wygładzania trendu i sezonowości. Najlepsze dopasowanie uzyskaliśmy dla ustawień $s.window = 13$, $t.window = 7$.
+
+### Wpływ transformacji Box'a-Cox'a
+Transformacja Boxa–Coxa jest klasycznym narzędziem służącym do stabilizacji wariancji i poprawy zgodności szeregu z założeniami modeli liniowych oraz metod dekompozycji. Jej zastosowanie może zmniejszyć skośność rozkładu, ograniczyć wpływ wartości odstających oraz sprawić, że błędy modelu będą bardziej jednorodne. Aby ocenić, czy transformacja poprawia jakość dopasowania, porównamy dekompozycję szeregu w wersji oryginalnej i przetransformowanej.
+
+```{r, echo=FALSE, fig.width=7, fig.height=7.5, fig.cap="\\label{fig:fig_dek5}Porównanie oryginalnego szeregu i szeregu po transformacji Boxa-Coxa", fig.align='center'}
+lambda <- BoxCox.lambda(bezrobocie)
+bezrobocie_bc <- BoxCox(bezrobocie, lambda)
+
+par(mfrow = c(2, 2))
+plot(bezrobocie, main = "Szereg oryginalny", ylab = "Bezrobocie")
+plot(bezrobocie_bc, main = paste("Po transformacji Boxa-Coxa"), 
+     ylab = "Bezrobocie")
+hist(bezrobocie, main = "Oryginalny rozkład", xlab = "Bezrobocie", col = "lightblue")
+hist(bezrobocie_bc, main = "Rozkład po transformacji", 
+     xlab = "Bezrobocie", ylab = "Częstość", col = "lightgreen")
+par(mfrow = c(1, 1))
+```
+
+Na wykresach \ref{fig:fig_dek5} widać, że transformacja Boxa–Coxa prowadzi do zmniejszenia zmienności. Amplituda krótkoterminowych wahań jest mniejsza.
+
+```{r, echo=FALSE, fig.width=7, fig.height=6, fig.cap="\\label{fig:fig_dek6}Porównanie dekompozycji STL bez i z Transformacją Boxa-Coxa", fig.align='center'}
+dekomp.stl.1.bc <- stl(bezrobocie_bc, s.window = "periodic")
+dopasowanie.stl.bc <- trendcycle(dekomp.stl.1.bc) + seasonal(dekomp.stl.1.bc)
+
+plot(bezrobocie, 
+     main = "",
+     ylab = "Stopa bezrobocia", 
+     xlab = "Czas",
+     lwd = 2,
+     col = "black")
+
+lines(dopasowanie.stl.1, col = "red", lwd = 1.5)
+lines(dopasowanie.stl.bc, col = "blue", lwd = 1.5)
+
+legend("topright", 
+       legend = c("Szereg",
+                  "STL",
+                  "STL z Box-Cox"),
+       col = c("black", "red", "blue"), 
+       lwd = c(2, 1.5, 1.5, 1.5, 1.5),
+       bg = "white",
+       cex = 0.8)
+```
+
+Dla dekompozycji `STL` przedstawionej na rysunku \ref{fig:fig_dek6} obserwujemy, że zastosowanie transformacji Boxa–Coxa nie poprawia jakości dopasowania, a wręcz prowadzi do jego pogorszenia. Po transformacji trend staje się zbyt wygładzony i zaczyna odbiegać od rzeczywistego kształtu szeregu. Najbardziej widoczne jest to w latach 2009–2015, gdzie oryginalny `STL` dobrze odzwierciedla zarówno rosnący, jak i później malejący trend. Tymczasem wersja po transformacji Boxa–Coxa wygładza te zmiany zbyt mocno, przez co trend reaguje z opóźnieniem.
+
+```{r, echo=FALSE, fig.width=7, fig.height=6, fig.cap="\\label{fig:fig_dek7}Porównanie dekompozycji TLSM z wielomianem 4 stopnia bez i z Transformacją Boxa-Coxa", fig.align='center'}
+dekomp.tlsm.1.bc <- tslm(bezrobocie_bc ~ trend + I(trend^2) + I(trend^3) + I(trend^4) + season)
+
+plot(bezrobocie, 
+     main = "",
+     ylab = "Stopa bezrobocia", 
+     xlab = "Czas",
+     lwd = 2,
+     col = "black")
+
+lines(fitted(tslm_quad), col = "red", lwd = 1.5)
+lines(fitted(dekomp.tlsm.1.bc), col = "blue", lwd = 1.5)
+
+legend("topright", 
+       legend = c("Szereg",
+                  "TLSM",
+                  "TLSM z Box-Cox"),
+       col = c("black", "red", "blue"), 
+       lwd = c(2, 1.5, 1.5, 1.5, 1.5),
+       bg = "white",
+       cex = 0.8)
+```
+
+W przypadku modeli parametrycznych opartych na regresji z rysuneku \ref{fig:fig_dek7} transformacja Boxa–Coxa może redukować autokorelację reszt i poprawiać dopasowanie trendu szczególnie przy wielomianach wyższych rzędów. Mimo to w naszym przypadku wielomianu 4 stopnia, znaczna większość trendu jest niedoszacowana lub przeszacowana. Może to też wynikać z faktu, że model bez transformacji również słabo dopasowywuje się do szeregu.
+
+```{r, echo=FALSE, fig.width=7, fig.height=6, fig.cap="\\label{fig:fig_dek8}Porównanie dekompozycji ruchomej średniej bez i z Transformacją Boxa-Coxa", fig.align='center'}
+dekomp.add.bc <- decompose(bezrobocie_bc, type = "additive")
+dekomp.add.bc.fit <- dekomp.add.bc$trend + dekomp.add.bc$seasonal
+
+plot(bezrobocie, 
+     main = "",
+     ylab = "Stopa bezrobocia", 
+     xlab = "Czas",
+     lwd = 2,
+     col = "black")
+
+lines(dekomp.add.fit, col = "red", lwd = 1.5)
+lines(dekomp.add.bc.fit, col = "blue", lwd = 1.5)
+
+legend("topright", 
+       legend = c("Szereg",
+                  "Moving avg",
+                  "Moving avg z Box-Cox"),
+       col = c("black", "red", "blue"), 
+       lwd = c(2, 1.5, 1.5, 1.5, 1.5),
+       bg = "white",
+       cex = 0.8)
+```
+
+W dekompozycji opartej na ruchomej średniej z rysuneku \ref{fig:fig_dek8} transformacja Boxa–Coxa również nie poprawia jakości dopasowania. Wręcz przeciwnie, dopasowanie trendu po transformacji staje się wyraźnie słabsze niż w przypadku analizy wykonanej na szeregu oryginalnym. Trend uzyskany po transformacji jest nadmiernie wygładzony i gorzej odwzorowuje rzeczywiste zmiany poziomu bezrobocia.
+
+Podsumowując, w przypadku badanego szeregu transformacja Boxa–Coxa nie prowadzi do poprawy jakości dekompozycji, a w wielu sytuacjach wręcz osłabia dopasowanie modeli. Choć transformacja skutecznie stabilizuje wariancję i krótkookresowe wahania szeregu, to jednocześnie nadmiernie wygładza strukturę danych, co negatywnie wpływa na rekonstrukcję trendu.
+
+## Porównanie wyników eliminacji trendu i sezonowości
+Teraz porównamy reszty dla wszystkich 3 typów dekompozycji. Na początek przeprowadzimy test białoszumowości.
+
+Wynik dla dekompozycji opartej na ruchomej średniej:
+```{r, echo=FALSE}
+res_add <- na.omit(dekomp.add$random)
+print(Box.test(res_add, type = "Ljung-Box"))
+```
+
+Wynik dla dekompozycji o model wielomianu 4 stopnia:
+```{r, echo=FALSE}
+res_tslm <- residuals(tslm_quad)
+print(Box.test(res_tslm, type = "Ljung-Box"))
+```
+
+Wynik dla dekompozycji STL:
+```{r, echo=FALSE}
+res_stl <- dekomp.stl.3$time.series[, "remainder"]
+print(Box.test(res_stl, type = "Ljung-Box"))
+```
+
+Aby nie polegać tylko na testach Ljunga-Box'a, zwizualizujemy reszty na wykresach.
+```{r, echo=FALSE, fig.width=7, fig.height=5, fig.cap="\\label{fig:fig_reszt1}Wykresy reszt dla każdej dekompozycji", fig.align='center'}
+par(mfrow = c(1, 3))
+plot(res_add, type = "l", main = "Dekompozycja addytywna", ylab = "Reszty", xlab = "Czas")
+plot(res_tslm, type = "l", main = "Model TSLM (stopnia 4)", ylab = "Reszty", xlab = "Czas")
+plot(res_stl, type = "l", main = "Dekompozycja STL", ylab = "Reszty", xlab = "Czas")
+par(mfrow = c(1, 1))
+```
+Analizując wykresy przedstawione na rysunku \ref{fig:fig_reszt1}, można stwierdzić, że reszty pochodzące z dekompozycji opartej na modelu nie zachowują się jak biały szumu. Wyraźnie widoczny jest w nich trend. W przypadku dekompozycji `STL` reszty wydają się całkowicie losowe, co sugeruje, że można je uznać za biały szum. Dla dekompozycji addytywnej wykres reszt wygląda w przybliżeniu jak biały szum, jednak formalny test Ljunga wskazuje na odrzucenie hipotezy zerowej, co oznacza, że reszty nie są w pełni losowe. Oznacza to, że metoda `STL` najlepiej radzi sobie z usunięciem struktury z szeregu czasowego, pozostawiając reszty losowe. Natomiast w dekompozycji addytywnej i modelu klasycznym pewne wzorce pozostają niewyjaśnione.
+
+```{r, echo=FALSE, fig.width=7, fig.height=8, fig.cap="\\label{fig:fig_reszt2}Wykresy ACF dla reszt każdej dekompozycji", fig.align='center'}
+par(mfrow = c(3, 1))
+
+acf_add <- acf(res_add, plot = FALSE)
+plot(acf_add$lag, acf_add$acf, type = "h", lwd = 2, ylim = c(-1,1),
+     xlab = "Lag", ylab = "ACF", main = "Dekompozycja addytywna")
+abline(h = c(-1.96/sqrt(length(res_add)), 1.96/sqrt(length(res_add))), 
+       col = "red", lty = 2, lwd = 2)
+abline(h = 0, col = "black", lty = 1)
+points(acf_add$lag[abs(acf_add$acf) > 1.96/sqrt(length(res_add))], 
+       acf_add$acf[abs(acf_add$acf) > 1.96/sqrt(length(res_add))], 
+       col = "red", pch = 19)
+
+acf_tslm <- acf(res_tslm, plot = FALSE)
+plot(acf_tslm$lag, acf_tslm$acf, type = "h", lwd = 2, ylim = c(-1,1),
+     xlab = "Lag", ylab = "ACF", main = "Model TSLM (stopnia 4)")
+abline(h = c(-1.96/sqrt(length(res_tslm)), 1.96/sqrt(length(res_tslm))), 
+       col = "red", lty = 2, lwd = 2)
+abline(h = 0, col = "black", lty = 1)
+points(acf_tslm$lag[abs(acf_tslm$acf) > 1.96/sqrt(length(res_tslm))], 
+       acf_tslm$acf[abs(acf_tslm$acf) > 1.96/sqrt(length(res_tslm))], 
+       col = "red", pch = 19)
+
+acf_stl <- acf(res_stl, plot = FALSE)
+plot(acf_stl$lag, acf_stl$acf, type = "h", lwd = 2, ylim = c(-1,1),
+     xlab = "Lag", ylab = "ACF", main = "Dekompozycja STL")
+abline(h = c(-1.96/sqrt(length(res_stl)), 1.96/sqrt(length(res_stl))), 
+       col = "red", lty = 2, lwd = 2)
+abline(h = 0, col = "black", lty = 1)
+points(acf_stl$lag[abs(acf_stl$acf) > 1.96/sqrt(length(res_stl))], 
+       acf_stl$acf[abs(acf_stl$acf) > 1.96/sqrt(length(res_stl))], 
+       col = "red", pch = 19)
+par(mfrow = c(1, 1))
+```
+\newpage
+Wykresy ACF dla reszt przedstawione na rysunku \ref{fig:fig_reszt2} potwierdzają wcześniejsze wnioski z testu Ljunga-Boxa i analizy wykresów reszt. Analiza funkcji autokorelacji wyraźnie wskazuje na obecność istotnych zależności w resztach z modelu TSLM oraz dekompozycji addytywnej, gdzie wartości ACF wielokrotnie przekraczają granice istotności. W przeciwieństwie do nich, wykres ACF dla dekompozycji `STL` nie wykazuje żadnych istotnych autokorelacji, co potwierdza jej skuteczność w eliminacji struktury z danych. Tym samym metoda `STL` okazuje się najbardziej efektywna w usuwaniu trendu i sezonowości, pozostawiając reszty najbliższe białemu szumowi.
+
+## Wnioski końcowe
+Przeprowadzona analiza szeregu `bezrobocia` pozwala wyciągnąć kluczowe wnioski dotyczące efektywności różnych metod dekompozycji. Spośród porównywanych podejść, dekompozycja `STL` okazała się najskuteczniejsza w eliminacji trendu i sezonowości, pozostawiając reszty najbardziej zbliżone do białego szumu. Metody oparte na ruchomej średniej i modelach `TSLM`, choć poprawne teoretycznie, nie radziły sobie równie dobrze z niestacjonarnością danych. Transformacja Boxa-Coxa nie przyniosła oczekiwanej poprawy jakości dekompozycji, a wręcz pogorszyła dopasowanie trendu w większości przypadków. Analiza wykresów ACF jednoznacznie potwierdziła, że jedynie reszty z dekompozycji STL można uznać za wystarczająco zbliżone do białego szumu dla celów praktycznych.
