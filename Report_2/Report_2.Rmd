@@ -1,0 +1,564 @@
+---
+title: "Dopasowanie modeli AR i porównania dokładności prognoz"
+author: "Ksawery Józefowski, 277513"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: true
+    fig_caption: true
+    fig_width: 5
+    fig_height: 4
+    number_sections: true
+  html_document:
+    toc: true
+    df_print: paged
+header-includes:
+- \usepackage[OT4]{polski}
+- \usepackage[utf8]{inputenc}
+- \usepackage{graphicx}
+- \usepackage{float}
+subtitle: Analiza szeregów czasowych
+fontsize: 12pt
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+knitr::opts_chunk$set(fig.pos = "H", out.extra = "", fig.align = "center")
+library(knitr)
+library(kableExtra)
+library(ggplot2)
+library(gridExtra)
+library(forecast)
+library(fitdistrplus)
+library(xtable)
+library(tseries)
+library(seasonal)
+library(astsa)
+library(fpp2)
+```
+
+\newpage
+
+# Dopasowanie modeli i prognozy szeregów
+
+## Wstęp
+
+Celem tej części analizy jest dopasowanie modelu \texttt{AR} do szeregu \texttt{gtemp both}. Dane te przedstawiają odchylenia średniej rocznej temperatury (na powierzchni lądów i oceanów) w latach 1850-2023, mierzone względem średniej temperatury globalnej wyznaczonej dla okresu 1991-2020.
+
+## Test stacjonarności
+
+W celu dopasowania modelu stacjonarnego do wybranego szeregu, musimy zbadać jego stacjonarność. Na obrazku \ref{fig:Wykres1} prezentujemy jak wygląda szereg oraz jego funkcja autokorelacji. Zauważalny jest silny trend wzrostowy. Sezonowość jest najprawdopodobniej nieobecna.
+```{r, fig.cap="\\label{fig:Wykres1}Wizualizacja szeregu oraz wykres ACF", fig.align='center', echo=FALSE}
+data(gtemp_both)
+dane <- gtemp_both
+par(mfrow = c(1, 2))
+plot(dane,
+     main = "Szereg",
+     ylab = "Odchylenie temperatury",
+     xlab = "Rok")
+
+acf(dane,
+    main = "ACF szeregu gtemp_both")
+```
+Do sprowadzenia szeregu do postaci stacjonarnej posłużymy się dwoma metodami:
+\begin{itemize}
+  \item Różnicowaniem
+  \item Eliminacją trendu wielowymiarowego
+\end{itemize}
+
+Na danych wywołujemy dwie funkcje, \texttt{ndiffs} oraz \texttt{nsdiffs}. \texttt{ndiffs} stwierdza, że powinniśmy skorzystać z `r ndiffs(dane)` krotnego różnicowania, a \texttt{nsdiffs} zwraca błąd potwierdzając tym samym, że w szeregu nie występuje sezonowość.
+```{r}
+# ndiffs(dane) # 1 krotne roznicowanie
+# nsdiffs(dane) # stwierdza ze nie ma sezonu
+dane.diff.1 <- diff(dane)
+```
+
+```{r, fig.cap="\\label{fig:Wykres2}Wizualizacja szeregu oraz wykres ACF po różnicowaniu", fig.align='center', echo=FALSE}
+par(mfrow = c(1, 2))
+plot(dane.diff.1,
+     main = "Pierwsze różnicowanie",
+     ylab = "Różnica",
+     xlab = "Rok")
+
+acf(dane.diff.1,
+    main = "ACF po różnicowaniu")
+par(mfrow = c(1, 1))
+```
+Na obrazu \ref{fig:Wykres2} prezentujemy szereg i jego ACF po `r ndiffs(dane)` krotnym różnicowaniu. Bazując na wykresach można stwierdzić, że szereg jest teraz stacjonarny.
+
+Następnie badamy trend wielowymiarowy. Z rysunku \ref{fig:Wykres3} wnioskujemy, że trend liniowy nie jest dobrym dopasowaniem do szeregu, tym samym zbadamy teraz trend kwadratowy.
+```{r}
+dane.trend.1 <- tslm(dane ~ trend)
+```
+
+```{r, fig.cap="\\label{fig:Wykres3}Estymacja szeregu po eliminacji trendu liniowego", fig.align='center', echo=FALSE}
+autoplot(cbind(dane, dane.trend.1$fitted), lwd=1)
+```
+
+```{r}
+dane.trend.2 <- tslm(dane ~ trend + I(trend^2))
+# summary(dane.trend.2)
+```
+
+```{r, fig.cap="\\label{fig:Wykres4}Estymacja szeregu po eliminacji trendu kwadratowego", fig.align='center', echo=FALSE}
+autoplot(cbind(dane, dane.trend.2$fitted), lwd=1)
+```
+
+Trend kwadratowy jak widać na obrazuk \ref{fig:Wykres4} estymuje idealnie nasz szereg, więc dalszą analizę będziemy kontynuuować po jego eliminacji
+```{r, fig.cap="\\label{fig:Wykres5}Szereg, ACF i PACF po eliminacji trendu kwadratowego", fig.align='center', echo=FALSE}
+dane.reszty.2 <- dane - dane.trend.2$fitted
+
+ggtsdisplay(dane.reszty.2)
+```
+Jak widzimy na obrazku \ref{fig:Wykres5} eliminacja trendu kwadratowego pozwoliła na przybranie przez szereg postaci stacjonarnej.
+
+## Wybór optymalnego rzędu dla modelu \texttt{AR(p)}
+
+Następnym krokiem analizy jest wybór optymalnego $p$. Do tego użyjemy wykresów PACF szeregów jak i również kryteriów informacyjnych AIC i FPE.
+Na rysunku \ref{fig:Wykres6} poniżej prezentujemy wykresy PACF dla szeregu bazowego i jego wersji stacjonarnych. Wstępnie możemy wywnioskować, że dla wersji po różnicowaniu optymalny parametr $p=5$, a po eliminacji trendu $p=12$.
+```{r, fig.cap="\\label{fig:Wykres6}Wykresy PACF bazowego szeregu i jego postaci po transformacjach", fig.align='center', echo=FALSE}
+par(mfrow = c(1, 3), mar=c(4,4,3,1))
+pacf(dane,
+     main = "Szereg bazowy")
+pacf(dane.diff.1,
+     main = "Różnicowanie")
+pacf(dane.reszty.2,
+     main = "Eliminacja trendu")
+par(mfrow = c(1, 1))
+```
+Dla potwierdzenia naszych wniosków prezentujemy wykresy \ref{fig:Wykres7} kryterium AIC. Potwierdza ono, że $p=5$ jest odpowiednim parametrem dla szeregu po różnicowaniu, jednakże dla wersji z eliminacją trendu stwierdza, że powinniśmy wybrać $p=1$.
+```{r}
+n <- length(dane)
+p.max.AIC <- floor(10*log10(n))
+
+ar.aic.diff <- ar(dane.diff.1, aic = TRUE)$aic
+ar.aic.trend <- ar(dane.reszty.2, aic = TRUE)$aic
+```
+
+```{r, fig.cap="\\label{fig:Wykres7}Wykresy AIC dla szeregu po różnicowaniu i eliminacji trendu", fig.align='center', echo=FALSE}
+par(mfrow = c(1, 2), mar=c(4,4,3,1))
+plot(0:p.max.AIC, ar.aic.diff, type="b", xlab="p", main="Różnicowanie") 
+grid()
+
+plot(0:p.max.AIC, ar.aic.trend, type="b", xlab="p", main="Eliminacja trendu") 
+grid()
+par(mfrow = c(1, 1))
+```
+Dla pewności dodatkowo zbadamy kryterium FPE. Na rysunku \ref{fig:Wykres8} prezentujemy wykresy kryterium FPE. Po tym badaniu jesteśmy jednoznacznie stwierdzić, że szereg po różnicowani powinien za parametr przyjąć $p=5$, a szereg po eliminacji trendu $p=1$.
+```{r}
+dane.reszty <- dane.reszty.2
+N <- length(dane.reszty)
+p.max.FPE <- floor(2 * sqrt(N))
+fpe.tslm <- numeric(p.max.FPE)
+
+for (p in 1:p.max.FPE) {
+  c.MN <- (N+p) / (N-p)
+  fpe.value <- ar(dane.reszty, aic=FALSE, method="yw", order.max=p)$var.pred 
+  fpe.tslm[p] <- c.MN * fpe.value
+}
+
+reszty_diff <- dane.diff.1
+N <- length(reszty_diff)
+p.max.FPE <- floor(2 * sqrt(N))
+fpe.diff <- numeric(p.max.FPE)
+
+for (p in 1:p.max.FPE) {
+  c.MN <- (N + p) / (N - p)
+  fpe.diff[p] <- ar(reszty_diff, aic = FALSE, method = "yw", order.max = p)$var.pred * c.MN
+}
+```
+```{r, fig.cap="\\label{fig:Wykres8}Wykresy FPE dla szeregu po różnicowaniu i eliminacji trendu", fig.align='center', echo=FALSE}
+par(mfrow = c(1, 2), mar=c(4,4,3,1))
+plot(1:p.max.FPE, fpe.tslm, type="b", xlab="p", ylab = "FPE",
+     main = "Eliminacja trendu") 
+
+plot(1:p.max.FPE, fpe.diff, type = "b", xlab = "p", ylab = "FPE",
+     main = "Różnicowanie")
+grid()
+par(mfrow = c(1, 1))
+```
+
+## Porównanie estymacji współczynników modeli AR(p) metodą Yule’a-Walkera i największej wiarogodności
+
+Dla obu przekształceń dopasujemy modele AR(p) o wybranym rzędzie ($p = 5$ dla szeregu różnicowanego oraz $p = 1$ dla reszt po eliminacji trendu), stosując dwie metody estymacji współczynników:
+
+\begin{itemize}
+    \item Yule’a-Walkera - metoda estymacji wstępnej oparta na układzie równań normalnych.
+    \item Największej wiarogodności - estymacja oparta na maksymalizacji funkcji wiarygodności.
+\end{itemize}
+
+Przeprowadzimy następujące operacje dla obu przekształceń:
+
+\begin{itemize}
+    \item Dopasowanie modelu AR(p) metodą YW i MLE.
+    \item Wyznaczenie współczynników modelu (\texttt{coef.diff.yw}, \texttt{coef.diff.mle}, \texttt{coef.trend.yw}, \texttt{coef.trend.mle}).
+    \item Oszacowanie wariancji składnika losowego (\texttt{var.wn.diff.yw}, \texttt{var.wn.diff.mle}, \texttt{var.wn.trend.yw}, \texttt{var.wn.trend.mle}).
+    \item Porównanie współczynników i wariancji dla obu metod.
+\end{itemize}
+
+Wyniki pokazują, że współczynniki i wariancje są podobne niezależnie od zastosowanej metody estymacji, zarówno dla szeregu różnicowanego, jak i dla reszt po eliminacji trendu, co potwierdza spójność estymacji metodą Yule’a-Walkera i MLE.
+
+```{r}
+ar.fit.diff.yw <- ar(dane.diff.1, order.max=5, aic=FALSE, method="yule-walker")
+coef.diff.yw <- ar.fit.diff.yw$ar
+var.wn.diff.yw <- ar.fit.diff.yw$var.pred
+cov.diff.yw <- ar.fit.diff.yw$asy.var.coef
+order.diff.yw <- ar.fit.diff.yw$order
+
+ar.fit.diff.mle <- ar(dane.diff.1, order.max=5, aic=FALSE, method="mle")
+coef.diff.mle <- ar.fit.diff.mle$ar
+var.wn.diff.mle <- ar.fit.diff.mle$var.pred 
+order.diff.mle <- ar.fit.diff.mle$order
+
+ar.fit.trend.yw <- ar(dane.reszty.2, order.max = 1, aic = FALSE, method = "yule-walker")
+coef.trend.yw <- ar.fit.trend.yw$ar
+var.wn.trend.yw <- ar.fit.trend.yw$var.pred
+cov.trend.yw <- ar.fit.trend.yw$asy.var.coef
+order.trend.yw <- ar.fit.trend.yw$order
+
+ar.fit.trend.mle <- ar(dane.reszty.2, order.max = 1, aic = FALSE, method = "mle")
+coef.trend.mle <- ar.fit.trend.mle$ar
+var.wn.trend.mle <- ar.fit.trend.mle$var.pred
+order.trend.mle <- ar.fit.trend.mle$order
+```
+```{r, echo=FALSE}
+cat("YW dla eliminacji trendu\n")
+coef.trend.yw
+var.wn.trend.yw
+#order.trend.yw
+#cov.trend.yw
+
+cat("\n")
+cat("MLE dla eliminacji trendu\n")
+coef.trend.mle
+var.wn.trend.mle
+#order.trend.mle
+
+cat("\n")
+cat("YW dla różnicowania\n")
+coef.diff.yw
+var.wn.diff.yw
+#order.diff.yw
+#cov.diff.yw
+
+cat("\n")
+cat("MLE dla różnicowania\n")
+coef.diff.mle
+var.wn.diff.mle
+#order.diff.mle
+
+```
+Porównując wyniki estymacji współczynników modeli AR(p) metodą Yule’a-Walkera oraz największej wiarogodności, możemy stwierdzić, że dla obu rodzajów przekształceń danych, współczynniki są bardzo zbliżone, podobnie jak wariancje składnika losowego. Dla szeregu różnicowanego współczynniki AR są ujemne i malejące w kolejnych lagach, co wskazuje na silną autoregresję krótkookresową, natomiast dla reszt po eliminacji trendu współczynnik AR(1) jest dodatni i znacznie mniejszy, sugerując słabszą dynamikę krótkookresową. Wariancja składnika losowego dla szeregu różnicowanego jest nieco większa niż dla reszt po eliminacji trendu, co jest zgodne z większą zmiennością pierwszych różnic w porównaniu do zdekorelowanych reszt. Ogólnie można stwierdzić, że modele AR(p) zostały dobrze dopasowane, a wybór metody estymacji nie wpływa istotnie na wartości oszacowanych parametrów ani na wariancję reszt dlatego, też analizę będziemy kontynuuować przy użyciu estymacji metodą Yule’a-Walkera.
+
+## Ocena istotności współczynników
+
+W celu oceny statystycznej istotności współczynników wybranego modelu AR(p) zastosujemy twierdzenie o asymptotycznej normalności estymatorów. Dla każdej wartości parametru $\theta_i$ skonstruujemy asymptotyczny 95\% przedział ufności według wzoru $\hat{\theta}_i \pm z_{1-\alpha/2} \cdot \text{SE}(\hat{\theta}_i)$, gdzie $\hat{\theta}_i$ oznacza estymator współczynnika, a $\text{SE}(\hat{\theta}_i)$ jego błąd standardowy. 
+
+Najpierw przeanalizujem szereg różnicowany przy użyciu metody Yule’a-Walkera. Wyznaczone przedziały ufności pozwolą sprawdzić hipotezę zerową $H_0: \theta_i = 0$ przeciwko alternatywie $H_1: \theta_i \neq 0$. Współczynniki, dla których przedział ufności zawiera zero, uznamy za nieistotne statystycznie i potencjalnie możliwe do pominięcia w modelu. Analogicznie, przeprowadzimy analizę dla reszt po eliminacji trendu wielomianowego, również z wykorzystaniem estymacji Yule’a-Walkera.
+
+```{r}
+model <- ar.fit.diff.yw
+hat.theta <- model$ar
+se <- sqrt(diag(model$asy.var.coef))
+TL_1 <- hat.theta - ( qnorm(1-0.05/2) * se )
+TU_1 <- hat.theta + ( qnorm(1-0.05/2) * se )
+
+model <- ar.fit.trend.yw
+hat.theta <- model$ar
+se <- sqrt(diag(model$asy.var.coef))
+TL_2 <- hat.theta - (qnorm(1 - 0.05/2) * se)
+TU_2 <- hat.theta + (qnorm(1 - 0.05/2) * se)
+```
+```{r,echo=FALSE}
+cat("Różnicowanie\n")
+TL_1
+TU_1
+which(TL_1<0 & TU_1>0)
+
+cat("\nEliminacja trendu\n")
+TL_2
+TU_2
+which(TL_2<0 & TU_2>0)
+```
+Analiza przedziałów ufności dla parametrów modelu AR(p) wykazała, że dla szeregu różnicowanego wszystkie współczynniki mają przedziały ufności, które nie obejmują zera, co oznacza, że wszystkie są statystycznie istotne. Oznacza to, że model AR(5) dla szeregu różnicowanego dobrze opisuje krótkookresową dynamikę szeregu. W przypadku reszt po eliminacji trendu współczynnik AR(1) również okazał się istotny statystycznie, a w modelu nie stwierdzamy żadnych współczynników nieistotnych. Ogólnie możemy stwierdzić, że wybrane modele AR(p) są statystycznie uzasadnione, a oszacowane współczynniki powinny zostać uwzględnione w modelu.
+
+## Ocena dopasowania modeli
+
+W celu oceny dopasowania wybranych modeli AR(p) przeprowadzimy analizę reszt. Rozważymy dwa modele: AR(5) dla szeregu różnicowanego oraz AR(1) dla reszt po eliminacji trendu. Analiza obejmie wykresy reszt, funkcję autokorelacji, testy losowości Ljung-Box'a oraz sprawdzenie normalności rozkładu reszt za pomocą histogramu, wykresu kwantylowego oraz testu Shapiro-Wilka. Celem jest weryfikacja, czy reszty zachowują się jak biały szum, co jest warunkiem poprawnego dopasowania modelu autoregresyjnego.
+
+```{r, fig.cap="\\label{fig:Wykres9}Wykresy reszt i ich ACF dla AR(5)", fig.align='center', echo=FALSE}
+model <- ar.fit.diff.yw 
+model.reszty <- ar.fit.diff.yw$resid
+
+par(mfrow = c(1, 2), mar=c(4,4,3,1))
+plot(model.reszty,
+     main="AR(5) wykres reszt")
+Acf(model.reszty, lag.max=30,
+    main = "AR(5) ACF reszt")
+```
+```{r, fig.cap="\\label{fig:Wykres10}Histogram i wykres kwantylowy reszt dla AR(5)", fig.align='center',echo=FALSE}
+par(mfrow = c(1, 2), mar=c(4,4,3,1))
+
+hist(model.reszty, main = "histogram")
+qqnorm(model.reszty, main="wykres kwantylowy")
+qqline(model.reszty, col="red")
+par(mfrow = c(1, 1))
+```
+
+```{r,echo=FALSE}
+Box.test(model.reszty, lag = 1,
+         type="Ljung-Box")
+Box.test(model.reszty, lag = 12,
+         fitdf=ar.fit.diff.yw$order,
+         type="Ljung-Box")
+shapiro.test(model.reszty)
+```
+Przeprowadziliśmy szczegółową analizę reszt modelu AR(5) dopasowanego do szeregu różnicowanego. Wykresy reszt \ref{fig:Wykres9} nie wykazują żadnych regularnych wzorców, co sugeruje brak niepożądanych zależności wizualnych. Funkcja autokorelacji pokazuje jedynie pojedynczą niewielką autokorelację przy lag = 12, która nie wydaje się istotna. Test Ljunga-Boxa dla lag = 1 oraz lag = 12 nie odrzuca hipotezy o losowości reszt, co potwierdza brak istotnej autokorelacji. Test Shapiro-Wilka jak i wykresy rozkładu \ref{fig:Wykres10} wskazują również, że rozkład reszt jest zbliżony do normalnego. Wnioskujemy z tego, że model AR(5) dobrze dopasowuje dane po różnicowaniu, a reszty zachowują się jak biały szum.
+```{r, fig.cap="\\label{fig:Wykres11}Wykresy reszt i ich ACF dla AR(1)", fig.align='center',echo=FALSE}
+par(mfrow = c(1, 2), mar=c(4,4,3,1))
+model <- ar.fit.trend.yw
+model.reszty <- model$resid
+plot(model.reszty,
+     main = "AR(1) wykres reszt")
+
+Acf(model.reszty, lag.max = 30,
+    main = "AR(1) ACF reszt")
+```
+```{r, fig.cap="\\label{fig:Wykres12}Histogram i wykres kwantylowy reszt dla AR(1)", fig.align='center',echo=FALSE}
+par(mfrow = c(1, 2), mar=c(4,4,3,1))
+hist(model.reszty, main = "Histogram reszt AR(1)")
+qqnorm(model.reszty, main = "QQ-plot reszt AR(1)")
+qqline(model.reszty, col = "red")
+```
+```{r,echo=FALSE}
+Box.test(model.reszty, lag = 1,
+         type = "Ljung-Box")
+
+Box.test(model.reszty, lag = 12,
+         fitdf = model$order,
+         type = "Ljung-Box")
+shapiro.test(model.reszty)
+```
+Dla modelu AR(1) dopasowanego do reszt po eliminacji trendu obserwujemy podobne zależności. Wykres reszt \ref{fig:Wykres11} nie pokazuje regularnych wzorców, a ACF nie ujawnia istotnych autokorelacji. Testy Ljunga-Boxa dla różnych lagów (lag = 1 oraz lag = 12) wskazują brak istotnej autokorelacji. Rozkład reszt na wykresach \ref{fig:Wykres12} jest również zbliżony do normalnego, co potwierdza test Shapiro-Wilka. Możemy więc stwierdzić, że model AR(1) dla reszt po eliminacji trendu jest dobrze dopasowany, a reszty zachowują się jak biały szum, co umożliwia wiarygodną interpretację i prognozowanie szeregu.
+
+## Prognozowanie szeregu
+
+W kolejnym etapie przeprowadzimy prognozowanie wartości szeregu temperatur globalnych na podstawie wybranych modeli AR(p). Dla modelu AR(5) dopasowanego do szeregu różnicowanego (wybranego na podstawie PACF, AIC oraz FPE i oszacowanego metodą Yule’a-Walkera) skonstruowano prognozy na 6 okresów do przodu. Prognozy te zostały następnie przekształcone do poziomu oryginalnego szeregu poprzez odwrócenie różnicowania.  
+
+Dodatkowo wykonaliśmy prognozę dla modelu AR(1) dopasowanego do reszt po eliminacji trendu deterministycznego. W tym przypadku prognoza została skonstruowana jako suma przewidywanego trendu oraz prognozowanych reszt, co pozwala uzyskać prognozy w pierwotnej skali szeregu. Otrzymane wartości prognoz przedstawiono na wykresach wraz z danymi historycznymi.
+
+```{r}
+model <- ar.fit.diff.yw
+model.prognoza <- predict(model, n.ahead = 6)$pred
+prognoza <- diffinv(model.prognoza, lag=1, xi = dane[n])
+```
+```{r, fig.cap="\\label{fig:Wykres13}Bazowy szereg + jego prognoza dla AR(5)", fig.align='center',echo=FALSE}
+par(mfrow = c(1, 1), mar=c(4,4,3,1))
+autoplot(cbind(gtemp_both,prognoza))
+```
+```{r}
+reszty.prog <- predict(ar.fit.trend.yw, n.ahead = 6)$pred
+T <- length(dane)
+t.future <- (T+1):(T+6)
+trend.prog <- predict(dane.trend.2,
+                      newdata = data.frame(trend = t.future))
+prognoza <- trend.prog + reszty.prog
+```
+```{r, fig.cap="\\label{fig:Wykres14}Bazowy szereg + jego prognoza dla AR(1)", fig.align='center',echo=FALSE}
+autoplot(cbind(gtemp_both,prognoza))
+```
+Analizując prognozy obu modeli AR(p) na wykresach \ref{fig:Wykres13} i \ref{fig:Wykres14}, zauważamy, że model AR(5) dopasowany do szeregu różnicowanego generuje prognozy, które dobrze odzwierciedlają poziom i zmienność oryginalnego szeregu temperatur. W przypadku modelu AR(1) opartego na resztach po eliminacji trendu prognozy nieco odstają od obserwowanego szeregu, co sugeruje, że model ten lepiej nadaje się do uchwycenia ogólnych trendów niż do dokładnego odtwarzania krótkookresowych fluktuacji.  
+
+\newpage
+## Wnioski
+
+Podsumowując całą analizę, przeprowadziliśmy pełną procedurę dopasowania modeli autoregresyjnych AR(p) do danych. Dokonaliśmy transformacji szeregu poprzez różnicowanie oraz eliminację trendu, wybraliśmy rzędy modeli na podstawie PACF, AIC i FPE, oszacowaliśmy parametry metodami Yule’a-Walkera i MLE, a następnie oceniliśmy istotność współczynników za pomocą asymptotycznych przedziałów ufności. Analiza reszt, testy Ljunga-Boxa oraz testy normalności potwierdziły poprawność dopasowania modeli. Prognozy wykazały, że model AR(p) po różnicowaniu najlepiej odtwarza krótkookresowe wahania szeregu, natomiast model po eliminacji trendu dobrze uchwycił główny kierunek zmian, ale mniej precyzyjnie oddaje poziom szeregu. Wnioski te sugerują, że w praktyce warto uwzględniać zarówno transformacje różnicowe, jak i trendowe, w zależności od celu analizy.
+
+\newpage
+
+# Porównanie dokładności prognoz
+
+## Wstęp
+
+Głównym celem zadania jest porównanie dokładności prognoz skonstruowanych na bazie modeli (S)ARIMA, modeli dekompozycji oraz algorytmów wygładzania wykładniczego dla danych euretail.
+
+## Podział na zbiór testowy i uczący
+
+W celu oceny jakości prognoz szereg czasowy \texttt{euretail} podzielimy na zbiór uczący oraz zbiór testowy. Zbiór uczący obejmuje początkową część szeregu, natomiast zbiór testowy składa się z ostatnich 16 obserwacji, które posłużą do weryfikacji dokładności prognoz. Takie podejście pozwala na ocenę modeli w sposób odzwierciedlający rzeczywiste prognozowanie przyszłych wartości szeregu.
+
+```{r}
+data(euretail)
+
+n_test <- 16
+euretail.learn <- window(euretail, end = 
+                      time(euretail)[length(euretail) - n_test])
+euretail.test <- window(euretail, start = 
+                      time(euretail)[length(euretail) - n_test + 1])
+h <- length(euretail.test)
+```
+
+## Dopasowanie odpowiedniach modeli do danych
+W niniejszej części pracy przeprowadzimy identyfikację oraz dopasowanie różnych klas modeli szeregów czasowych dla danych \texttt{euretail}. Analiza obejmie wstępne przekształcenia danych, badanie stacjonarności, identyfikację modeli ARIMA, modeli trendu oraz algorytmów wygładzania wykładniczego. Celem jest wybór modeli najlepiej opisujących dynamikę badanego szeregu i nadających się do dalszego prognozowania.
+
+Na start zrobimy wizualną analizę szeregu czasowego oraz zastosujemy transformację Boxa-Coxa w celu stabilizacji wariancji.
+```{r}
+par(mfrow = c(1,2), mar=c(4,4,3,1))
+lambda <- BoxCox.lambda(euretail.learn, method = "loglik")
+euretail.learn.bc <- BoxCox(euretail.learn, lambda = lambda)
+```
+```{r, fig.cap="\\label{fig:Wykres15}Bazowy zbiór uczący i jego wersja po transformacji Boxa-Coxa", fig.align='center', echo=FALSE}
+par(mfrow = c(1,2))
+autoplot(euretail.learn, main="Zbiór uczący")
+autoplot(euretail.learn.bc, main="Zbiór uczący po transformacji BC")
+```
+Na obrazku \ref{fig:Wykres15} możemy zauważyć, że transformacja Boxa-Coxa nic nie wnosi, więc nie będziemy jej używać w dalszej części.
+
+Następnie sprawdzimy stopień niestacjonarności szeregu przy użyciu liczby wymaganych różnic zwykłych oraz sezonowych. Na tej podstawie przeprowadzimy odpowiednie różnicowanie w celu uzyskania szeregu stacjonarnego. Funkcja \texttt{ndiffs} zwraca, że szereg powinniśmy różnicować `r ndiffs(euretail.learn)` raz, a funkcja \texttt{nsdiffs} stwierdza, że różnicowanie sezonowe powinno być przeprowadzone `r nsdiffs(euretail.learn)` razy.
+
+```{r, results='hide'}
+ndiffs(euretail.learn) # 1
+nsdiffs(euretail.learn) # 1
+
+euretail.diff <- diff(euretail.learn, lag = 4)
+euretail.diff <- diff(euretail.diff, lag = 1)
+
+mean(euretail.diff)
+```
+```{r, fig.cap="\\label{fig:Wykres16}Szereg po różnicowaniu i różnicowaniu sezonowym", fig.align='center', echo=FALSE}
+ggtsdisplay(euretail.diff)
+```
+Wykres \ref{fig:Wykres16} potwierdza, że szereg po wcześniej wspomnianych krotnościach różnicowań jest stacjonarny, również pozwala on na identyfikację potencjalnych modeli ARIMA. Rozważymy model autoregresyjny oraz model średniej ruchomej. Średnia różnicowanego szeregu wynosi `r mean(euretail.diff)`, jest ona różna od $0$, więc zbadamy modele z dryfem.
+
+```{r}
+model.ar <- Arima(
+  euretail.learn,
+  order = c(4,2,0),
+  seasonal = c(0,1,0),
+  include.drift = TRUE
+)
+
+model.ma <- Arima(
+  euretail.learn,
+  order = c(0,2,9),
+  seasonal = c(0,1,0),
+  include.drift = TRUE
+)
+
+summary(model.ar)
+summary(model.ma)
+```
+
+Dodatkowo zastosujemy funkcję \texttt{auto.arima}, przeprowadzając dokładne przeszukiwanie przestrzeni modeli z wykorzystaniem kryteriów informacyjnych AICc oraz BIC.
+```{r}
+model.auto.aicc <- auto.arima(
+  euretail.learn,
+  stepwise = FALSE,
+  approximation = FALSE,
+  ic = "aicc"
+)
+
+model.auto.bic <- auto.arima(
+  euretail.learn,
+  stepwise = FALSE,
+  approximation = FALSE,
+  ic = "bic"
+)
+
+summary(model.auto.aicc)
+summary(model.auto.bic)
+```
+W kolejnym kroku dopasujemy model trendu ze składową sezonową oraz nieliniowym trendem czasowym, wykorzystując regresję dla szeregów czasowych.
+
+```{r}
+model.tslm <- tslm(euretail.learn ~ season + trend + I(trend^2))
+summary(model.tslm)
+```
+Rozważymy również modele oparte na wygładzaniu wykładniczym, w tym proste wygładzanie, modele Holta, Holta-Wintersa oraz automatyczny model ETS.
+```{r}
+model.ses <- ses(euretail.learn, initial = "optimal")
+
+model.holt <- holt(euretail.learn)
+model.holt.damped <- holt(euretail.learn, damped = TRUE)
+
+model.hw.add <- hw(euretail.learn, seasonal = "additive")
+model.hw.mult <- hw(euretail.learn, seasonal = "multiplicative")
+
+model.ets <- ets(euretail.learn)
+summary(model.ets)
+```
+Na podstawie przeprowadzonych estymacji dokonamy oceny w oparciu o kryteria informacyjne oraz miary błędów dopasowania na zbiorze uczącym.
+
+Spośród ręcznie identyfikowanych modeli ARIMA lepsze dopasowanie uzyskał model ARIMA(0,2,9)(0,1,0)$_4$, jednak ze względu na dużą liczbę parametrów i wysoką wartość kryterium BIC uznamy go za nadmiernie złożony. Najlepsze wyniki w klasie modeli ARIMA osiągnął model automatyczny ARIMA(1,0,0)(1,1,0)$_4$ z dryfem, który charakteryzuje się najniższymi wartościami kryteriów informacyjnych oraz prostą strukturą, co czyni go dobrym kandydatem do prognozowania.
+
+Model TSLM z sezonowością oraz nieliniowym trendem bardzo dobrze opisuje dane historyczne, co potwierdza wysoka wartość skorygowanego współczynnika $R^2$ oraz istotność większości parametrów. Ze względu na deterministyczny charakter trendu model ten będzie traktowany jako punkt odniesienia w dalszej analizie.
+
+Model ETS(A,A,A) cechuje się niskimi wartościami błędów prognoz na zbiorze uczącym, jednak wyższe wartości kryteriów informacyjnych wskazują na większą złożoność modelu.
+
+Do dalszej analizy i porównania prognoz wybierzemy modele
+\begin{itemize}
+  \item ARIMA(1,0,0)(1,1,0)$_4$ z dryfem,
+  \item model TSLM z trendem kwadratowym,
+  \item model ETS(A,A,A).
+\end{itemize}
+
+## Wyznaczenie prognoz dla zbioru testowego
+
+W pierwszym kroku skonstruujemy prognozy na zbiór testowy z wykorzystaniem wybranego modelu ARIMA, który został wskazany w poprzednim etapie analizy jako jeden z najlepszych modeli pod względem kryteriów informacyjnych. Prognozy zostały wyznaczone na $h$ okresów do przodu, gdzie $h$ odpowiada liczbie obserwacji w zbiorze testowym. Na wykresie \ref{fig:Wykres17} przedstawiamy zarówno prognozy wraz z przedziałami predykcyjnymi, jak i rzeczywiste obserwacje testowe.
+
+```{r}
+forecast.arima <- forecast(
+  model.auto.aicc,
+  h = h
+)
+```
+```{r, fig.cap="\\label{fig:Wykres17}Prognoza ARIMA na zbiorze testowym", fig.align='center', echo=FALSE}
+autoplot(forecast.arima) +
+  autolayer(euretail.test, series = "test", color = "red")
+```
+Następnie wykonamy prognozowanie na zbiór testowy przy użyciu modelu dekompozycyjnego TSLM, uwzględniającego sezonowość oraz nieliniowy trend kwadratowy. Model ten pozwala w sposób jawny opisać długookresową tendencję rozwojową szeregu oraz wahania sezonowe. Uzyskane prognozy prezentujemy na obrazku \ref{fig:Wykres18}.
+
+```{r}
+forecast.tslm <- forecast(
+  model.tslm,
+  h = h
+)
+```
+```{r, fig.cap="\\label{fig:Wykres18}Prognoza TSLM na zbiorze testowym", fig.align='center', echo=FALSE}
+autoplot(forecast.tslm) +
+  autolayer(euretail.test, series = "test", color = "red")
+```
+
+Kolejnym rozważanym podejściem będzie automatycznie dobrany model ETS, oparty na algorytmach wygładzania wykładniczego. Metoda ta pozwala na elastyczne modelowanie poziomu, trendu oraz sezonowości szeregu czasowego. Prognozy wygenerowane przez model ETS obrazujemy na rysunku \ref{fig:Wykres19}.
+
+```{r}
+forecast.ets <- forecast(
+  model.ets,
+  h = h
+)
+```
+```{r, fig.cap="\\label{fig:Wykres19}Prognoza ETS na zbiorze testowym", fig.align='center', echo=FALSE}
+autoplot(forecast.ets) +
+  autolayer(euretail.test, series = "test", color = "red")
+```
+W celu obiektywnego porównania rozważanych modeli wykorzystamy miary błędów prognoz wyznaczone na zbiorze testowym, takie jak RMSE, MAE oraz MAPE. Porównanie to pozwala wskazać model charakteryzujący się najlepszą jakością predykcji poza próbą uczącą, a tym samym rekomendowany do dalszych analiz i zastosowań praktycznych.
+
+```{r}
+cat("ARIMA\n")
+accuracy(forecast.arima, euretail.test)
+cat("\ntslm\n")
+accuracy(forecast.tslm, euretail.test)
+cat("\nets\n")
+accuracy(forecast.ets, euretail.test)
+```
+Niska jakość prognoz w zbiorze testowym wynika głównie z istotnej zmiany zachowania szeregu w tym okresie. W danych testowych obserwujemy wyraźny spadek poziomu szeregu, który nie był obecny w zbiorze uczącym. W konsekwencji modele, które poprawnie ekstrapolują dotychczasowy trend i sezonowość, generują prognozy wizualnie spójne z historią, jednak obarczone dużymi błędami punktowymi.
+
+## Wnioski
+
+Na podstawie przeprowadzonej analizy porównawczej rozważanych podejść do modelowania szeregu czasowego można stwierdzić, że modele ARIMA oraz ETS charakteryzowały się bardzo zbliżoną jakością dopasowania do zbioru uczącego. W obu przypadkach uzyskaliśmy relatywnie niskie wartości miar błędu, co świadczy o dobrej zdolności tych modeli do opisu dynamiki szeregu, obejmującej zarówno trend, jak i sezonowość. Model dekompozycyjny typu \texttt{tslm}, wypadł najsłabiej pod względem miar błędu, co sugeruje, że dobrze opisuje długookresową strukturę trendu, lecz gorzej radzi sobie z krótkookresowymi wahaniami szeregu.
+
+W trakcie analizy wykorzystaliśmy zarówno klasyczne metody identyfikacji modeli (ACF, PACF, różnicowanie, eliminację sezonowości), jak i podejścia automatyczne (\texttt{auto.arima()}, \texttt{ets()}). Dodatkowo sprawdziliśmy istotność współczynników, własności reszt oraz poprawność założeń modelowych, co pozwoliło na świadomy wybór modeli rekomendowanych do dalszej analizy i prognozowania.
+
+Należy jednak podkreślić, że ocena jakości prognoz na zbiorze testowym okazała się problematyczna dla wszystkich rozważanych modeli. W okresie testowym obserwujemy wyraźną zmianę zachowania szeregu czasowego, polegającą na gwałtownym spadku poziomu, który nie był widoczny w zbiorze uczącym. W konsekwencji nawet modele dobrze dopasowane do danych historycznych generowały prognozy obarczone dużymi błędami punktowymi, co znalazło odzwierciedlenie w wysokich wartościach RMSE, MAE oraz współczynnika Theila.
+
+W związku z powyższym niską jakość prognoz w zbiorze testowym należy interpretować nie jako błąd konstrukcji modeli, lecz jako efekt zmiany struktury procesu generującego dane. Ostatecznie, biorąc pod uwagę zarówno dopasowanie do danych uczących, jak i własności modeli, za najbardziej adekwatne podejścia dla analizowanego szeregu uznajemy modele ARIMA oraz ETS, przy czym ich skuteczność prognostyczna jest istotnie ograniczona przez niestabilność szeregu w końcowym okresie obserwacji.
